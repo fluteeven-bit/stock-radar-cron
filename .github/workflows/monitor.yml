@@ -1,28 +1,33 @@
 name: 進場雷達盤中監控
 
-# 開盤時間每 5 分鐘呼叫一次監控 API（UTC 時間）
-#   08:00-23:59 平日：美股盤前 04:00 ET 到盤後
-#   00:00-01:59 週二到週六：美股冬令時間的盤後
-#   01:00-06:59 平日：台股 09:00-14:59
+# GitHub 對「每 5 分鐘」這種密集排程常常直接略過，所以改成：
+# 每半小時啟動一次，啟動後在同一個工作裡連續跑 30 分鐘、每 5 分鐘呼叫一次監控 API。
+# 這樣就算 GitHub 的排程誤點，也只會少掉一小段，不會整天都不跑。
+# 時間為 UTC：08-23 平日＝美股盤前到盤後；00-01 週二到週六＝美股冬令盤後；01-06 平日＝台股。
 on:
   schedule:
-    - cron: '*/5 8-23 * * 1-5'
-    - cron: '*/5 0-1 * * 2-6'
-    - cron: '*/5 1-6 * * 1-5'
+    - cron: '2,32 8-23 * * 1-5'
+    - cron: '2,32 0-1 * * 2-6'
+    - cron: '2,32 1-6 * * 1-5'
   workflow_dispatch:
 
 concurrency:
   group: radar-monitor
-  cancel-in-progress: false
+  cancel-in-progress: true
 
 jobs:
-  ping:
+  loop:
     runs-on: ubuntu-latest
-    timeout-minutes: 3
+    timeout-minutes: 34
     steps:
-      - name: 呼叫監控 API
+      - name: 每 5 分鐘呼叫一次監控 API，連續 30 分鐘
         run: |
-          code=$(curl -sS -m 90 -o /tmp/out.json -w '%{http_code}' "${{ secrets.MONITOR_URL }}")
-          echo "HTTP $code"
-          head -c 800 /tmp/out.json
-          test "$code" = "200"
+          fail=0
+          for i in $(seq 1 7); do
+            code=$(curl -sS -m 90 -o /tmp/out.json -w '%{http_code}' "${{ secrets.MONITOR_URL }}" || echo 000)
+            echo "[$(date -u +%H:%M) UTC] HTTP $code $(head -c 160 /tmp/out.json)"
+            [ "$code" = "200" ] || fail=$((fail+1))
+            if [ "$i" -lt 7 ]; then sleep 290; fi
+          done
+          echo "失敗次數: $fail / 7"
+          [ "$fail" -lt 7 ]
