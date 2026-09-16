@@ -1,0 +1,19 @@
+name: 保持排程啟用
+
+# GitHub 會把「60 天沒有動靜的公開專案」的排程自動停用，每月重新啟用一次避免被關掉
+on:
+  schedule:
+    - cron: '0 5 1 * *'
+  workflow_dispatch:
+
+permissions:
+  actions: write
+
+jobs:
+  enable:
+    runs-on: ubuntu-latest
+    steps:
+      - name: 重新啟用監控排程
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh api -X PUT "repos/${{ github.repository }}/actions/workflows/monitor.yml/enable" || true
