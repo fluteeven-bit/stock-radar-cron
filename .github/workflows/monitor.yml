@@ -1,33 +1,94 @@
-name: 進場雷達盤中監控
+name: 進場雷達監控（備援）
 
-# GitHub 對「每 5 分鐘」這種密集排程常常直接略過，所以改成：
-# 每半小時啟動一次，啟動後在同一個工作裡連續跑 30 分鐘、每 5 分鐘呼叫一次監控 API。
-# 這樣就算 GitHub 的排程誤點，也只會少掉一小段，不會整天都不跑。
-# 時間為 UTC：08-23 平日＝美股盤前到盤後；00-01 週二到週六＝美股冬令盤後；01-06 平日＝台股。
+# ⚠⚠ 這條是「備援」，主力是 Cloudflare Workers Cron（每 5 分鐘）。
+#
+# 2026-10-08 第一次量這條的「真實涵蓋率」，結果跟設定差很遠：
+#   ・設定是每半小時啟動一次連續跑 30 分鐘 ＝ 一個平日約 46 趟
+#   ・GitHub 實際只給 3–6 趟/天（整個歷史只有 29 趟）—— 密集排程它會大量略過，改不了
+#   ・落在「睡前那一則」視窗（美東 08:30–09:30）的呼叫：6 個平日一共 0 次
+#   ・盤中涵蓋：225 / 2340 分鐘 ＝ 9.6%
+#   ・而它每天燒掉約 120 分鐘（29 分鐘裡幾乎都是 sleep，不是工作）
+# 同一天量到的主力：Cloudflare 每小時 11–12 次、287 次/天、錯誤 0、24 小時全蓋。
+#
+# 所以策略改掉。放棄「全天候備援」（做不到，而且貴），改成只保護一件事：
+#   👉 **睡前那一則**。它每天無條件發（包含「可以睡」那一天），
+#      是唯一能證明「整套還活著」的那一則；其他提醒有事才發，漏了看不出來。
+# 做法兩點：
+#   ① 排程只留在那個視窗前後 —— GitHub 願意給的那幾趟就會落在這裡
+#   ② job 自己會「等到視窗打開」才打，不再盲目每 5 分鐘打 7 次；
+#      視窗已經過了就打一次確認端點活著然後收工（約 0.3 分鐘，不燒額度）
+#
+# ⚠ 視窗是**美東當地時間**：夏令 12:30–13:30 UTC、冬令 13:30–14:30 UTC。
+#   寫死一個 UTC 時間的話一年有一半落在視窗外，而且換季那天不會有人通知你。
+#   所以 12/13/14 三個小時都排，真正的判斷交給 job 裡的 TZ=America/New_York。
+# ⚠ 這個 repo 必須保持 PUBLIC（私有的話免費額度 2,000 分鐘擋不住）。
+#   也因此**不可以把持倉成本之類的東西寫進這個檔案** —— 監控網址放在 repo secret。
 on:
   schedule:
-    - cron: '2,32 8-23 * * 1-5'
-    - cron: '2,32 0-1 * * 2-6'
-    - cron: '2,32 1-6 * * 1-5'
+    - cron: '5,20,35,50 12-14 * * 1-5'
   workflow_dispatch:
 
 concurrency:
   group: radar-monitor
-  cancel-in-progress: true
+  # ⚠ 刻意是 false（不要 cancel-in-progress）：被取消掉的那一趟
+  #   可能正是「已經等到視窗、正要打」的那一趟。
+  cancel-in-progress: false
 
 jobs:
-  loop:
+  brief:
     runs-on: ubuntu-latest
-    timeout-minutes: 34
+    timeout-minutes: 55
     steps:
-      - name: 每 5 分鐘呼叫一次監控 API，連續 30 分鐘
+      - name: 等到睡前視窗再呼叫監控 API
+        env:
+          URL: ${{ secrets.MONITOR_URL }}
         run: |
-          fail=0
-          for i in $(seq 1 7); do
-            code=$(curl -sS -m 90 -o /tmp/out.json -w '%{http_code}' "${{ secrets.MONITOR_URL }}" || echo 000)
-            echo "[$(date -u +%H:%M) UTC] HTTP $code $(head -c 160 /tmp/out.json)"
-            [ "$code" = "200" ] || fail=$((fail+1))
-            if [ "$i" -lt 7 ]; then sleep 290; fi
+          set -u
+          FROM=510          # 美東 08:30
+          TO=570            # 美東 09:30
+          MAX_WAIT=1800     # 最多等 30 分鐘；GitHub 有時延遲很久才給這一趟，等太久是白燒
+          et() { TZ=America/New_York date +'%-H %-M' | awk '{print $1*60+$2}'; }
+          hhmm() { printf '%02d:%02d' $(($1/60)) $(($1%60)); }
+
+          call() {
+            code=$(curl -sS -m 90 -o /tmp/out.json -w '%{http_code}' "$URL" || echo 000)
+            echo "[美東 $(hhmm "$(et)")] HTTP $code $(head -c 200 /tmp/out.json)"
+            [ "$code" = "200" ]
+          }
+
+          now=$(et)
+          echo "啟動時間：美東 $(hhmm "$now")（睡前視窗 08:30–09:30）"
+
+          if [ "$now" -ge "$TO" ]; then
+            echo "視窗已經過了。打一次確認端點活著就收工。"
+            call
+            exit $?
+          fi
+
+          if [ "$now" -lt "$FROM" ]; then
+            wait=$(( (FROM - now) * 60 ))
+            if [ "$wait" -gt "$MAX_WAIT" ]; then
+              echo "距離視窗還有 $((wait/60)) 分鐘，超過上限，這一趟不等（避免白燒分鐘數）。"
+              exit 0
+            fi
+            echo "距離視窗還有 $((wait/60)) 分鐘，等它打開。"
+            sleep "$wait"
+          fi
+
+          # 視窗裡最多打 4 次，但**成功一次就收工** —— 睡前那一則已經發出去了，
+          # 再打 3 次只是多燒 15 分鐘（去重也會把它們擋掉）。
+          # 失敗才重試：視窗有 60 分鐘，夠試 4 次。
+          ok=0
+          for i in 1 2 3 4; do
+            now=$(et)
+            if [ "$now" -ge "$TO" ]; then echo "視窗結束。"; break; fi
+            if call; then ok=1; echo "成功，收工（不必再打）。"; break; fi
+            echo "這一次沒成功，5 分鐘後再試。"
+            if [ "$i" -lt 4 ]; then sleep 300; fi
           done
-          echo "失敗次數: $fail / 7"
-          [ "$fail" -lt 7 ]
+          if [ "$ok" = "1" ]; then
+            echo "✅ 視窗內至少成功呼叫一次"
+          else
+            echo "⚠ 視窗內沒有任何一次成功"
+          fi
+          [ "$ok" = "1" ]
