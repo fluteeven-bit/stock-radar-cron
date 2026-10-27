@@ -1,0 +1,68 @@
+name: 內部人集群買入（每天掃，有才推播）
+
+# 「同一家公司好幾位高管或董事各自掏錢買」發生的那一天，推播一則。
+#
+# ⚠⚠ 判斷<一行都不在這個倉庫裡>：scan-clusters.mjs 每次跑之前，
+#   從 https://evan-stock-radar.vercel.app/lib/*.js 把判斷用的那幾支抓下來再跑 ——
+#   所以推播用的那套判斷，跟網站上看到的是<同一份>。
+#   在這裡自己抄一份的話，兩邊遲早分岔，而且<分岔的時候兩邊都不會紅燈>。
+#
+# ⚠ 為什麼不跑在網站上：Vercel 一支函式只有 60 秒，而這件事一天要打開約 470 份申報
+#   （7 天窗約 3,300 份，約 9 分鐘）；而且那邊的函式額度<已經 12/12 滿了>。
+#   這個倉庫是 public → Actions 分鐘數免費。
+#
+# ⚠ GitHub 的排程<不準時>（這個站實測過，會晚 2–7 小時）。不要緊：
+#   規則是「窗內人數<今天>第一次達到門檻」，幾點跑出來的答案都一樣，
+#   而且<沒有去重紀錄要維護>。排在 UTC 06:00（台灣 14:00），
+#   就算晚 7 小時也還在台灣時間 21:00 前。
+#
+# ⚠ 這個倉庫必須保持 PUBLIC，而且<不可以把任何金鑰寫進檔案裡>（NTFY_TOPIC 在 repo secret）。
+
+on:
+  schedule:
+    # 週二～週六的 UTC 06:00 ＝ 美東前一個交易日收盤後、台灣當天下午兩點。
+    - cron: '0 6 * * 2-6'
+  workflow_dispatch:
+    inputs:
+      dry:
+        description: '只印不發'
+        type: boolean
+        default: false
+      people:
+        description: '門檻幾位（留白＝用程式裡的預設 4）'
+        type: string
+        default: ''
+      days:
+        description: '窗幾天（留白＝用程式裡的預設 7）'
+        type: string
+        default: ''
+
+permissions:
+  contents: read
+
+concurrency:
+  group: insider-cluster
+  cancel-in-progress: false
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - name: 掃最近 7 個交易日的 Form 4，有集群才推播
+        env:
+          # ⚠ 沒有 NTFY_TOPIC 的話程式會<明說「設定沒給」然後失敗>，
+          #   不會安靜地跳過 —— 安靜跳過會被誤讀成「今天沒有訊號」。
+          NTFY_TOPIC: ${{ secrets.NTFY_TOPIC }}
+          # SEC 要求 User-Agent 帶聯絡方式。放 secret，不要寫進公開檔案。
+          SEC_UA: ${{ secrets.SEC_UA }}
+        run: |
+          ARGS=""
+          if [ "${{ inputs.dry }}" = "true" ]; then ARGS="$ARGS --dry"; fi
+          if [ -n "${{ inputs.people }}" ]; then ARGS="$ARGS --people=${{ inputs.people }}"; fi
+          if [ -n "${{ inputs.days }}" ]; then ARGS="$ARGS --days=${{ inputs.days }}"; fi
+          node scan-clusters.mjs $ARGS
