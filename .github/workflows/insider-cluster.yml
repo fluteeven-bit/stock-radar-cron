@@ -52,7 +52,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
-          node-version: '20'
+          node-version: '22'
       - name: 掃最近 7 個交易日的 Form 4，有集群才推播
         env:
           # ⚠ 沒有 NTFY_TOPIC 的話程式會<明說「設定沒給」然後失敗>，
