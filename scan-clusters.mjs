@@ -147,6 +147,22 @@ async function main() {
   }));
   say(`收到 ${rows.length} 列，讀不到 ${unread} 份（請求 ${nReq}、快取命中 ${nHit}、失敗 ${nFail}）`);
 
+  /* ⚠⚠ <讀不到>跟<沒有訊號>在程式眼裡長得一模一樣，而這一支的輸出是「要不要推播」——
+       所以讀不到一定要<自己喊出來>，不可以往下走然後印一句「今天沒有達標」。
+       那是這個站最忌諱的那種假話（鐵律⑤）。
+     實測風險：SEC 有可能擋機房 IP（[[learning_機房連不到的資料源]]：
+       <本機連得到不代表雲端連得到>）。擋掉的話 rows 會是空的，而「沒有達標」照樣印得出來。
+     👉 讀不到超過兩成、或一列都沒收到 → <明說讀不到、讓這一趟變紅燈、不發推播>。 */
+  const opened = done;
+  const badRate = opened ? unread / opened : 1;
+  if (!rows.length || badRate > 0.2) {
+    say(`\n⚠⚠ 這一趟<讀不到>：打開 ${opened} 份、讀不到 ${unread} 份`
+      + `（${Math.round(badRate * 100)}%）、收到 ${rows.length} 列。`);
+    say('　這<不是>「今天沒有人一起買」，是<問不到>。常見原因：SEC 擋了這台機器的 IP。');
+    say('　<不發推播>，而且讓這一趟變紅燈 —— 靜悄悄跳過會被誤讀成「今天沒事」。');
+    process.exit(1);
+  }
+
   /* ── ④ 判斷（全部走抓下來的那幾支 lib）── */
   const ps = rows.filter((r) => r.code === 'P' && Number(r.shares) > 0);
   const buys = collapse(ps)
