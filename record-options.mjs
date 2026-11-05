@@ -56,7 +56,12 @@ const quote = async (sym) => {
   const j = await jget(`${SITE}/api/quote?symbols=${encodeURIComponent(sym)}`);
   const q = Array.isArray(j) ? j[0] : null;
   if (!q || q.error) throw new Error(q ? q.error : '沒有回報價');
-  return (q.day && q.day.close != null) ? q.day.close : q.regularPrice;
+  const price = (q.day && q.day.close != null) ? q.day.close : q.regularPrice;
+  /* ⚠⚠ asOf ＝<這份資料的最後成交日>，不是跑的那一天。
+       排程在收盤之後跑，兩者本來就差一天；而<美股休市日照跑時 asOf 不會前進>，
+       去重靠它，就不會把同一份數字記成兩天（不需要休市日曆）。 */
+  const at = q.day && q.day.at;
+  return { price, asOf: at ? new Date(at * 1000).toISOString().slice(0, 10) : null };
 };
 const closeOn = async (sym, iso) => {
   barsCache[sym] ||= await jget(`${SITE}/api/chart?symbol=${encodeURIComponent(sym)}&range=1y`);
@@ -66,23 +71,29 @@ const closeOn = async (sym, iso) => {
 };
 
 const load = () => {
-  try { const j = JSON.parse(fs.readFileSync(OUT, 'utf8')); return { snaps: j.snaps || [], done: j.done || [] }; }
-  catch { return { snaps: [], done: [] }; }
+  /* ⚠⚠ 欄位<漏讀一個，下一次整包寫回就把它洗掉了>。dead 漏掉的話，
+       那幾組「永遠結算不了」會復活成「等待中」
+       （[[learning_整包覆蓋的存檔要先確認拿到完整清單]]）。 */
+  try {
+    const j = JSON.parse(fs.readFileSync(OUT, 'utf8'));
+    return { snaps: j.snaps || [], done: j.done || [], dead: j.dead || [] };
+  } catch { return { snaps: [], done: [], dead: [] }; }
 };
 
 const today = new Date().toISOString().slice(0, 10);
 const { state, tally } = await runRecord({ state: load(), today, quote, closeOn, log: say });
 
-say(`① 記：新增 ${tally.added} 筆快照（失敗 ${tally.failed} 檔）`);
+say(`① 記：新增 ${tally.added} 筆快照｜同一個成交日已經有了 ${tally.dup} 筆｜失敗 ${tally.failed} 檔`);
 say(`② 結算：新增 ${tally.settled} 組｜沒有合格快照 ${tally.noSnap}｜拿不到收盤 ${tally.noClose}`);
-say(`③ 存檔：快照 ${state.snaps.length} 筆｜結算 ${state.done.length} 組`);
+say(`③ 存檔：快照 ${state.snaps.length} 筆｜結算 ${state.done.length} 組｜`
+  + `永遠結算不了 ${(state.dead || []).length} 組（這一趟新認列 ${tally.dead} 組）`);
 
 const st = logStats(state.done);
 say(`目前結算 ${st.n} 組（門檻 ${st.min}）${st.enough ? '｜可以給結論了' : '｜還不夠，不給結論'}`);
 
 /* ⚠⚠ 一筆都沒記到就<不要寫檔> —— 上游壞掉的那一天把檔案覆蓋成空的，
      等於把之前累積的東西洗掉（[[learning_整包覆蓋的存檔要先確認拿到完整清單]]）。 */
-if (!tally.added && !tally.settled) {
+if (!tally.added && !tally.settled && !tally.dead) {
   say('⚠ 這一趟什麼都沒記到也沒結算到 —— 不寫檔，避免把累積的東西洗掉。');
   if (tally.fails.length) say('   失敗原因：' + tally.fails.slice(0, 5).join('｜'));
   process.exit(0);
