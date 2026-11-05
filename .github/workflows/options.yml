@@ -1,1 +1,59 @@
-.github/workflows/options.yml
+name: 選擇權往前記錄（每天一張快照）
+
+# 「錢堆在那個履約價，價格就會被吸過去」這件事<回頭量不了> ——
+# 資料源只給當月以後的選擇權鏈（問過去的月份回 400）。
+# 所以只剩一條路：每天把「最大未平倉履約價」與「當時現價」記下來，
+# 到期那天再對收盤。規則（預先登記）寫在網站的 lib/options-log.js 檔頭。
+#
+# ⚠⚠ 判斷<一行都不在這個倉庫裡>：record-options.mjs 每次跑之前，
+#   從 https://evan-stock-radar.vercel.app/lib/*.js 把規則抓下來再跑 ——
+#   所以排程記的跟網站上寫的是<同一份>。
+#
+# ⚠ GitHub 的排程<不準時>（這個站實測會晚 2–7 小時）。不要緊：
+#   這件事要的是「每個交易日有一張快照」，而規則只用「到期前 ≥3 天」那一張。
+#
+# ⚠ 這個倉庫必須保持 PUBLIC（Actions 分鐘數免費），而且這支<不需要任何金鑰>。
+
+on:
+  schedule:
+    # 週二～週六的 UTC 02:00 ＝ 美股前一個交易日收盤後、台灣當天上午十點。
+    # ⚠ 一定要在收盤之後：盤中的未平倉是昨天的數字，而成交量還沒走完。
+    - cron: '0 2 * * 2-6'
+  workflow_dispatch:
+    inputs:
+      dry:
+        description: '只印不寫檔'
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+
+concurrency:
+  group: options-record
+  cancel-in-progress: false
+
+jobs:
+  record:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - name: 記一張快照並結算到期的
+        run: node record-options.mjs ${{ inputs.dry && '--dry' || '' }}
+      - name: 有變才提交
+        if: ${{ !inputs.dry }}
+        run: |
+          set -e
+          if git diff --quiet -- options-log.json; then
+            echo "沒有變動，不提交"
+            exit 0
+          fi
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add options-log.json
+          git commit -m "🔬 選擇權往前記錄：$(date -u +%Y-%m-%d)"
+          git push
